@@ -1,0 +1,171 @@
+package org.example;
+
+import com.promptopt.TokenCounter;
+import com.promptopt.strategy.*;
+
+import java.util.List;
+import java.util.Scanner;
+
+/**
+ * Main is the entry point and terminal UI for BetterPrompt v2.
+ *
+ * V2 flow (per prompt):
+ *   1. User types a prompt
+ *   2. Four compression strategies are shown — user picks one
+ *   3. The chosen strategy compresses the prompt
+ *   4. TokenCounter shows before/after token comparison
+ *   5. V1's PromptOptimizer detects domain and applies a template
+ *   6. The final optimized prompt is printed
+ *   7. User can try a different strategy on the SAME prompt (loop), or move on
+ *
+ * Key new concept: List<CompressionStrategy> holds all four strategies.
+ * Because they all implement the same interface, we can store them together
+ * and call compress() on any of them without knowing which one it is.
+ * This is called "programming to an interface" — a core OOP principle.
+ */
+public class Main {
+
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+
+        // V1 optimizer — still used in V2 for domain detection + templating
+        PromptOptimizer optimizer = new PromptOptimizer();
+
+        // V2: token counter
+        TokenCounter tokenCounter = new TokenCounter();
+
+        // V2: all four strategies stored in a List by their shared interface type.
+        // List.of() creates an immutable list — order here determines menu numbers.
+        List<CompressionStrategy> strategies = List.of(
+            new RemoveRedundancyStrategy(),
+            new ShortenWordsStrategy(),
+            new RemoveContextStrategy(),
+            new SplitQuestionStrategy()
+        );
+
+        printBanner();
+
+        // ── Outer loop: one iteration per new prompt ──────────────────────────
+        while (true) {
+            System.out.print("\nEnter your prompt (or 'exit' to quit):\n> ");
+            String input = scanner.nextLine();
+
+            if (input.trim().equalsIgnoreCase("exit")) {
+                System.out.println("\nGoodbye! Happy prompting.");
+                break;
+            }
+            if (input.isBlank()) {
+                System.out.println("(Empty input — please type something.)");
+                continue;
+            }
+
+            // ── Inner loop: try different strategies on the SAME prompt ───────
+            String currentPrompt = input;   // reset each time we enter the inner loop
+            boolean tryAgain = true;
+
+            while (tryAgain) {
+                // Step 1: show strategy menu
+                printStrategyMenu(strategies);
+
+                System.out.print("Pick a strategy (1-4): ");
+                int choice = readInt(scanner, 1, 4);
+
+                // Step 2: apply chosen strategy (list is 0-indexed, menu is 1-indexed)
+                CompressionStrategy chosen = strategies.get(choice - 1);
+                String compressed = chosen.compress(currentPrompt);
+
+                System.out.println("\nStrategy applied: " + chosen.name());
+
+                // Step 3: build BOTH full prompts (user text + template) so the
+                // token counter measures what the AI actually receives, not just
+                // the raw user text.
+                //
+                // WHY run the optimizer twice?
+                //   The template wrapping the prompt is 30-50 tokens by itself.
+                //   Comparing only the user text ignores that shared cost and
+                //   makes small compressions look more impactful than they are.
+                //   Running on the original gives us the true "before" total;
+                //   running on the compressed gives the true "after" total.
+                //
+                // optimizer.optimize() returns the full prompt and also stores it
+                // internally — the second call overwrites the first, which is fine
+                // because we capture the first result in beforeFull.
+                String beforeFull = optimizer.optimize(currentPrompt);
+                String afterFull  = optimizer.optimize(compressed);
+
+                // Step 4: token comparison now uses full prompts (V2 fix)
+                tokenCounter.printComparison(beforeFull, afterFull);
+
+                // Step 5: before/after display — optimizer's last state is the
+                // compressed run, which is exactly what we want to show.
+                printComparison(currentPrompt, optimizer);
+
+                // Step 6: ask if user wants to try another strategy on same prompt
+                System.out.print("\nTry another strategy on the same prompt? (y/n): ");
+                String again = scanner.nextLine().trim();
+                tryAgain = again.equalsIgnoreCase("y");
+
+                // If trying again, compress the ORIGINAL prompt, not the already-compressed one.
+                // WHY: stacking strategies can produce unpredictable results in V1.
+                // V3 could allow chaining intentionally.
+                currentPrompt = input;
+            }
+        }
+
+        scanner.close();
+    }
+
+    // ── Display helpers ────────────────────────────────────────────────────────
+
+    private static void printBanner() {
+        System.out.println("=".repeat(60));
+        System.out.println("   BetterPrompt v2.0 — Compression + Token Awareness");
+        System.out.println("   By Andy | UW Sophomore | Java 21 | No external APIs");
+        System.out.println("=".repeat(60));
+        System.out.println("V2 adds: Strategy Pattern compression + Token Counter");
+        System.out.println("V1 features still active: domain detection + templates");
+    }
+
+    private static void printStrategyMenu(List<CompressionStrategy> strategies) {
+        System.out.println("\nChoose a compression strategy:");
+        for (int i = 0; i < strategies.size(); i++) {
+            // i+1 so menu shows 1, 2, 3, 4 instead of 0, 1, 2, 3
+            System.out.printf("  %d. %s%n", i + 1, strategies.get(i).name());
+        }
+    }
+
+    private static void printComparison(String original, PromptOptimizer optimizer) {
+        String divider = "-".repeat(60);
+        System.out.println("\n" + divider);
+        System.out.println("  DETECTED DOMAIN: " + optimizer.getLastDetectedDomain().getLabel());
+        System.out.println(divider);
+        System.out.println("\n[BEFORE — your original prompt]");
+        System.out.println(original);
+        System.out.println("\n[AFTER — compressed + domain-templated prompt]");
+        System.out.println(optimizer.getLastOptimizedPrompt());
+        System.out.println(divider);
+        System.out.println("Tip: copy the AFTER text and paste it into ChatGPT, Claude, etc.");
+    }
+
+    /**
+     * Reads an integer from the terminal, re-prompting if input is out of range
+     * or not a number. This prevents crashes from bad input.
+     *
+     * WHY handle this explicitly: Scanner.nextInt() throws an exception on
+     * non-numeric input. Using nextLine() + Integer.parseInt() in a try/catch
+     * gives us full control over the error message.
+     */
+    private static int readInt(Scanner scanner, int min, int max) {
+        while (true) {
+            String line = scanner.nextLine().trim();
+            try {
+                int value = Integer.parseInt(line);
+                if (value >= min && value <= max) return value;
+                System.out.printf("Please enter a number between %d and %d: ", min, max);
+            } catch (NumberFormatException e) {
+                // NumberFormatException is thrown when parseInt can't parse the string.
+                System.out.printf("Not a number — enter a value between %d and %d: ", min, max);
+            }
+        }
+    }
+}
